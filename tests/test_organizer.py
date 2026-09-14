@@ -1,5 +1,6 @@
-"""Unit tests for the File Organizer application."""
+"""Unit tests for the File Organizer application with MD5 checksum duplicate detection."""
 
+import hashlib
 from pathlib import Path
 import tempfile
 import unittest
@@ -10,7 +11,7 @@ from organizer.exceptions import (
     UnsupportedFileError,
 )
 from organizer.logger import close_logger_handlers, get_logger
-from organizer.mover import organize_directory
+from organizer.mover import calculate_md5, organize_directory
 
 
 class TestFileDetector(unittest.TestCase):
@@ -51,6 +52,25 @@ class TestFileDetector(unittest.TestCase):
         self.assertEqual(self.detector.get_category("part.stl"), "3DModels")
 
 
+class TestMD5ChecksumAndDuplicates(unittest.TestCase):
+    """Test suite for MD5 calculation and duplicate handling."""
+
+    def setUp(self) -> None:
+        self.temp_dir = tempfile.TemporaryDirectory()
+        self.root = Path(self.temp_dir.name)
+        self.sample_file = self.root / "sample.txt"
+        self.sample_file.write_text("hello world MD5 test", encoding="utf-8")
+
+    def tearDown(self) -> None:
+        self.temp_dir.cleanup()
+
+    def test_calculate_md5(self) -> None:
+        """Verify calculate_md5 matches hashlib calculation."""
+        expected_md5 = hashlib.md5(b"hello world MD5 test").hexdigest()
+        actual_md5 = calculate_md5(self.sample_file)
+        self.assertEqual(actual_md5, expected_md5)
+
+
 class TestFileMoverAndOrganizer(unittest.TestCase):
     """Test suite for FileMover and organize_directory."""
 
@@ -68,7 +88,6 @@ class TestFileMoverAndOrganizer(unittest.TestCase):
 
     def test_basic_file_organization(self) -> None:
         """Test organizing standard files into their respective subfolders."""
-        # Create test files
         (self.source / "photo.jpg").write_text("dummy photo")
         (self.source / "notes.txt").write_text("dummy notes")
         (self.source / "report.pdf").write_text("dummy report")
@@ -82,6 +101,7 @@ class TestFileMoverAndOrganizer(unittest.TestCase):
 
         self.assertEqual(stats["processed"], 4)
         self.assertEqual(stats["moved"], 4)
+        self.assertEqual(stats["duplicates"], 0)
         self.assertEqual(stats["failed"], 0)
 
         self.assertTrue((self.source / "Images" / "photo.jpg").exists())
@@ -107,6 +127,28 @@ class TestFileMoverAndOrganizer(unittest.TestCase):
         )
 
         self.assertTrue((dest_folder / "Images" / "photo.jpg").exists())
+
+    def test_duplicate_move_to_duplicates_folder(self) -> None:
+        """Test that duplicate files are moved into a separate Duplicates/ folder."""
+        images_dir = self.source / "Images"
+        images_dir.mkdir()
+        (images_dir / "photo.jpg").write_text("identical photo data")
+
+        # Source file with identical name and content
+        (self.source / "photo.jpg").write_text("identical photo data")
+
+        stats = organize_directory(
+            source_dir=self.source,
+            logger=self.logger,
+            duplicate_strategy="move_to_duplicates",
+        )
+
+        self.assertEqual(stats["processed"], 1)
+        self.assertEqual(stats["moved"], 1)
+        self.assertEqual(stats["duplicates"], 1)
+
+        self.assertTrue((self.source / "Images" / "photo.jpg").exists())
+        self.assertTrue((self.source / "Duplicates" / "photo.jpg").exists())
 
     def test_duplicate_rename_strategy(self) -> None:
         """Test that duplicate files are automatically renamed safely."""
@@ -140,6 +182,7 @@ class TestFileMoverAndOrganizer(unittest.TestCase):
         )
 
         self.assertEqual(stats["skipped"], 1)
+        self.assertEqual(stats["duplicates"], 1)
         self.assertTrue((self.source / "photo.jpg").exists())
 
     def test_duplicate_raise_strategy(self) -> None:
